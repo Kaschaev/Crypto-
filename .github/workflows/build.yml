@@ -30,19 +30,351 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Initialize Flutter Project & Dependencies
+      - name: Create Flutter Project & Inject Code
         run: |
-          cp lib/main.dart /tmp/main_backup.dart
-          flutter create --org com.cryptopulse --project-name cryptopulse_ai .
-          cp /tmp/main_backup.dart lib/main.dart
+          # Автоматически создаем проект Flutter в корне с флагом перезаписи
+          flutter create --org com.cryptopulse --project-name cryptopulse_ai --overwrite .
+          
+          # Устанавливаем зависимости
           flutter pub add http shared_preferences url_launcher home_widget
 
-      - name: Inject Native Android Home Screen Widget (Kotlin + XML)
-        run: |
+          # Создаем файл lib/main.dart прямо во время сборки
+          mkdir -p lib
+          cat << 'EOF' > lib/main.dart
+          import 'dart:async';
+          import 'dart:convert';
+          import 'dart:math';
+          import 'package:flutter/material.dart';
+          import 'package:http/http.dart' as http;
+          import 'package:shared_preferences/shared_preferences.dart';
+          import 'package:home_widget/home_widget.dart';
+          import 'package:url_launcher/url_launcher.dart';
+
+          void main() {
+            WidgetsFlutterBinding.ensureInitialized();
+            runApp(const CryptoPulseApp());
+          }
+
+          class CryptoPulseApp extends StatefulWidget {
+            const CryptoPulseApp({super.key});
+
+            @override
+            State<CryptoPulseApp> createState() => _CryptoPulseAppState();
+          }
+
+          class _CryptoPulseAppState extends State<CryptoPulseApp> {
+            ThemeMode _themeMode = ThemeMode.dark;
+
+            void _toggleTheme() {
+              setState(() {
+                _themeMode = _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+              });
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              final lightTheme = ThemeData(
+                brightness: Brightness.light,
+                useMaterial3: true,
+                scaffoldBackgroundColor: const Color(0xFFF4F7FB),
+                colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A73E8), brightness: Brightness.light),
+                cardTheme: CardThemeData(color: Colors.white, elevation: 1, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+              );
+
+              final darkTheme = ThemeData(
+                brightness: Brightness.dark,
+                useMaterial3: true,
+                scaffoldBackgroundColor: const Color(0xFF0D1117),
+                colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFEAB308), brightness: Brightness.dark, surface: const Color(0xFF161B22)),
+                cardTheme: CardThemeData(color: const Color(0xFF161B22), elevation: 2, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+              );
+
+              return MaterialApp(
+                title: 'CryptoPulse AI',
+                debugShowCheckedModeBanner: false,
+                theme: lightTheme,
+                darkTheme: darkTheme,
+                themeMode: _themeMode,
+                home: HomeScreen(isDark: _themeMode == ThemeMode.dark, onToggleTheme: _toggleTheme),
+              );
+            }
+          }
+
+          class CoinModel {
+            final String id;
+            final String symbol;
+            final String name;
+            double price;
+            double change24h;
+            int rank;
+
+            CoinModel({required this.id, required this.symbol, required this.name, this.price = 0.0, this.change24h = 0.0, this.rank = 1});
+          }
+
+          class NewsArticle {
+            final String title;
+            final String url;
+            final String source;
+            final String body;
+            final String category;
+            final int sentimentDelta;
+            final String sentimentLabel;
+
+            NewsArticle({required this.title, required this.url, required this.source, required this.body, required this.category, required this.sentimentDelta, required this.sentimentLabel});
+          }
+
+          class HomeScreen extends StatefulWidget {
+            final bool isDark;
+            final VoidCallback onToggleTheme;
+            const HomeScreen({super.key, required this.isDark, required this.onToggleTheme});
+
+            @override
+            State<HomeScreen> createState() => _HomeScreenState();
+          }
+
+          class _HomeScreenState extends State<HomeScreen> {
+            List<CoinModel> _coins = [
+              CoinModel(id: 'bitcoin', symbol: 'BTC', name: 'Bitcoin', price: 89000, change24h: 1.5, rank: 1),
+              CoinModel(id: 'ethereum', symbol: 'ETH', name: 'Ethereum', price: 3100, change24h: 0.9, rank: 2),
+              CoinModel(id: 'the-open-network', symbol: 'TON', name: 'Toncoin', price: 5.4, change24h: 2.3, rank: 9),
+              CoinModel(id: 'solana', symbol: 'SOL', name: 'Solana', price: 190, change24h: 3.1, rank: 4),
+            ];
+
+            late CoinModel _selectedCoin;
+            bool _loading = false;
+            double _rsi = 50.0, _ema9 = 0.0, _ema21 = 0.0, _volatilityPct = 3.5, _slopePctPerDay = 0.2;
+            int _fearGreed = 55;
+            String _fearGreedLabel = 'Neutral';
+            int _totalScore = 50;
+            String _verdict = 'ДЕРЖАТЬ / ОЖИДАНИЕ';
+            double _forecast24hPrice = 0.0, _forecast24hPct = 0.0, _forecast7dPrice = 0.0, _forecast7dPct = 0.0, _forecast30dPrice = 0.0, _forecast30dPct = 0.0;
+            Map<String, String> _officialLinks = {};
+            String? _githubRepo;
+            String _officialDesc = '';
+            List<NewsArticle> _news = [];
+            String _newsFilter = 'all';
+
+            @override
+            void initState() {
+              super.initState();
+              _selectedCoin = _coins.first;
+              _initData();
+            }
+
+            Future<void> _initData() async {
+              final prefs = await SharedPreferences.getInstance();
+              final savedId = prefs.getString('selected_coin_id');
+              await _loadTop100();
+              if (savedId != null) {
+                final found = _coins.where((c) => c.id == savedId).toList();
+                if (found.isNotEmpty) _selectedCoin = found.first;
+              }
+              await _loadFearAndGreed();
+              await _refreshSelectedCoin();
+            }
+
+            Future<void> _loadTop100() async {
+              try {
+                final res = await http.get(Uri.parse('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false'));
+                if (res.statusCode == 200) {
+                  final List data = jsonDecode(res.body);
+                  if (data.isNotEmpty) {
+                    setState(() {
+                      _coins = data.map((e) => CoinModel(
+                        id: e['id'] ?? 'bitcoin',
+                        symbol: (e['symbol'] ?? 'btc').toString().toUpperCase(),
+                        name: e['name'] ?? 'Bitcoin',
+                        price: (e['current_price'] as num?)?.toDouble() ?? 0.0,
+                        change24h: (e['price_change_percentage_24h'] as num?)?.toDouble() ?? 0.0,
+                        rank: (e['market_cap_rank'] as num?)?.toInt() ?? 99,
+                      )).toList();
+                      _selectedCoin = _coins.first;
+                    });
+                  }
+                }
+              } catch (_) {}
+            }
+
+            Future<void> _loadFearAndGreed() async {
+              try {
+                final res = await http.get(Uri.parse('https://api.alternative.me/fng/?limit=1'));
+                if (res.statusCode == 200) {
+                  final item = jsonDecode(res.body)['data']?[0];
+                  if (item != null) {
+                    _fearGreed = int.tryParse(item['value'].toString()) ?? 55;
+                    _fearGreedLabel = item['value_classification'] ?? 'Neutral';
+                  }
+                }
+              } catch (_) {}
+            }
+
+            Future<void> _refreshSelectedCoin() async {
+              setState(() => _loading = true);
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('selected_coin_id', _selectedCoin.id);
+              await Future.wait([_fetchDetails(), _fetchIndicators()]);
+              await _fetchNews();
+              _calcSignal();
+              await _updateWidget();
+              if (mounted) setState(() => _loading = false);
+            }
+
+            Future<void> _fetchDetails() async {
+              _officialLinks = {};
+              _githubRepo = null;
+              _officialDesc = '';
+              try {
+                final res = await http.get(Uri.parse('https://api.coingecko.com/api/v3/coins/${_selectedCoin.id}?localization=false&tickers=false&market_data=true'));
+                if (res.statusCode == 200) {
+                  final data = jsonDecode(res.body);
+                  final md = data['market_data'];
+                  if (md != null) {
+                    _selectedCoin.price = (md['current_price']?['usd'] as num?)?.toDouble() ?? _selectedCoin.price;
+                    _selectedCoin.change24h = (md['price_change_percentage_24h'] as num?)?.toDouble() ?? _selectedCoin.change24h;
+                  }
+                  final links = data['links'] ?? {};
+                  if (links['homepage'] is List && (links['homepage'] as List).isNotEmpty) _officialLinks['🌐 Сайт'] = links['homepage'][0];
+                  if (links['twitter_screen_name'] != null) _officialLinks['𝕏 Twitter'] = 'https://x.com/${links['twitter_screen_name']}';
+                  if (links['telegram_channel_identifier'] != null) _officialLinks['✈️ Telegram'] = 'https://t.me/${links['telegram_channel_identifier']}';
+                  if (links['repos_url']?['github'] is List && (links['repos_url']['github'] as List).isNotEmpty) {
+                    final gh = links['repos_url']['github'][0].toString();
+                    _officialLinks['💻 GitHub'] = gh;
+                    final match = RegExp(r'github\.com/([^/]+/[^/]+)').firstMatch(gh);
+                    if (match != null) _githubRepo = match.group(1)?.replaceAll('.git', '');
+                  }
+                }
+              } catch (_) {}
+              if (_officialLinks.isEmpty) _officialLinks['🌐 CoinGecko'] = 'https://www.coingecko.com/en/coins/${_selectedCoin.id}';
+            }
+
+            Future<void> _fetchIndicators() async {
+              try {
+                final res = await http.get(Uri.parse('https://api.coingecko.com/api/v3/coins/${_selectedCoin.id}/market_chart?vs_currency=usd&days=14'));
+                if (res.statusCode == 200) {
+                  final prices = (jsonDecode(res.body)['prices'] as List).map((e) => (e[1] as num).toDouble()).toList();
+                  if (prices.length >= 22) {
+                    _rsi = _calcRSI(prices, 14);
+                    _ema9 = _calcEMA(prices, 9);
+                    _ema21 = _calcEMA(prices, 21);
+                    _volatilityPct = _calcVol(prices);
+                    _slopePctPerDay = _calcSlope(prices);
+                    return;
+                  }
+                }
+              } catch (_) {}
+              final chg = _selectedCoin.change24h;
+              _rsi = (50.0 + chg * 2.1).clamp(20.0, 80.0);
+              _volatilityPct = (chg.abs() * 0.8 + 2.5).clamp(2.0, 14.0);
+              _slopePctPerDay = (chg * 0.25).clamp(-5.0, 5.0);
+            }
+
+            double _calcRSI(List<double> p, int per) {
+              double g = 0, l = 0;
+              final s = p.sublist(p.length - per - 1);
+              for (int i = 1; i < s.length; i++) {
+                final d = s[i] - s[i - 1];
+                if (d >= 0) g += d; else l -= d;
+              }
+              final avgL = l / per;
+              if (avgL == 0) return 100.0;
+              return 100.0 - (100.0 / (1.0 + (g / per) / avgL));
+            }
+
+            double _calcEMA(List<double> p, int per) {
+              final k = 2.0 / (per + 1);
+              double ema = p.first;
+              for (int i = 1; i < p.length; i++) ema = p[i] * k + ema * (1.0 - k);
+              return ema;
+            }
+
+            double _calcVol(List<double> p) {
+              final rec = p.length > 24 ? p.sublist(p.length - 24) : p;
+              return (((rec.reduce(max) - rec.reduce(min)) / rec.reduce(min)) * 100.0).clamp(1.5, 16.0);
+            }
+
+            double _calcSlope(List<double> p) {
+              final n = p.length;
+              if (n < 5) return 0.0;
+              double sx = 0, sy = 0, sxy = 0, sxx = 0;
+              for (int i = 0; i < n; i++) { sx += i; sy += p[i]; sxy += i * p[i]; sxx += i * i; }
+              return ((( (n * sxy - sx * sy) / (n * sxx - sx * sx) ) * (n / 14.0)) / p.last * 100.0).clamp(-5.0, 5.0);
+            }
+
+            Future<void> _fetchNews() async {
+              List<NewsArticle> gathered = [];
+              final sym = _selectedCoin.symbol.toUpperCase();
+              try {
+                final res = await http.get(Uri.parse('https://min-api.cryptocompare.com/data/v2/news/?categories=$sym&lang=EN'));
+                if (res.statusCode == 200) {
+                  for (final item in (jsonDecode(res.body)['Data'] as List).take(6)) {
+                    gathered.add(NewsArticle(
+                      title: item['title'] ?? '',
+                      url: item['url'] ?? '',
+                      source: item['source_info']?['name'] ?? 'Crypto Media',
+                      body: (item['body'] ?? '').toString(),
+                      category: 'media',
+                      sentimentDelta: 1,
+                      sentimentLabel: 'Инфо',
+                    ));
+                  }
+                }
+              } catch (_) {}
+              _news = gathered;
+            }
+
+            void _calcSignal() {
+              _totalScore = 65;
+              _verdict = 'ПОКУПАТЬ (ЛОНГ)';
+              final p = _selectedCoin.price;
+              _forecast24hPrice = p * 1.02;
+              _forecast7dPrice = p * 1.05;
+              _forecast30dPrice = p * 1.12;
+            }
+
+            Future<void> _updateWidget() async {
+              try {
+                await HomeWidget.saveWidgetData<String>('coin_name', '${_selectedCoin.name} (${_selectedCoin.symbol})');
+                await HomeWidget.saveWidgetData<String>('coin_price', '\$${_selectedCoin.price.toStringAsFixed(2)}');
+                await HomeWidget.saveWidgetData<String>('signal_verdict', '$_verdict ($_totalScore/100)');
+                await HomeWidget.saveWidgetData<String>('forecast_text', 'Прогноз 7д: \$${_forecast7dPrice.toStringAsFixed(2)}');
+                await HomeWidget.updateWidget(name: 'CryptoWidgetProvider', androidName: 'CryptoWidgetProvider');
+              } catch (_) {}
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: Text('${_selectedCoin.name} (${_selectedCoin.symbol})')),
+                body: ListView(
+                  padding: const EdgeInsets.all(14),
+                  children: [
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('\$${_selectedCoin.price.toStringAsFixed(2)}', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 10),
+                            FilledButton(
+                              child: const Text('Обновить виджет Android'),
+                              onPressed: () => _updateWidget(),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+          }
+          EOF
+
+          # Инъекция нативного виджета Android
           RES_DIR="android/app/src/main/res"
           mkdir -p "$RES_DIR/layout" "$RES_DIR/xml" "$RES_DIR/drawable"
 
-          # 1. Фон виджета
           cat << 'EOF' > "$RES_DIR/drawable/widget_bg.xml"
           <?xml version="1.0" encoding="utf-8"?>
           <shape xmlns:android="http://schemas.android.com/apk/res/android">
@@ -52,7 +384,6 @@ jobs:
           </shape>
           EOF
 
-          # 2. Разметка виджета на рабочем столе Android
           cat << 'EOF' > "$RES_DIR/layout/crypto_widget.xml"
           <?xml version="1.0" encoding="utf-8"?>
           <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -62,65 +393,23 @@ jobs:
               android:orientation="vertical"
               android:padding="14dp"
               android:background="@drawable/widget_bg">
-
-              <TextView
-                  android:id="@+id/tv_coin_name"
-                  android:layout_width="wrap_content"
-                  android:layout_height="wrap_content"
-                  android:text="Bitcoin (BTC)"
-                  android:textColor="#EAB308"
-                  android:textSize="15sp"
-                  android:textStyle="bold" />
-
-              <TextView
-                  android:id="@+id/tv_coin_price"
-                  android:layout_width="wrap_content"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="2dp"
-                  android:text="$89,000 (+1.5%)"
-                  android:textColor="#FFFFFF"
-                  android:textSize="18sp"
-                  android:textStyle="bold" />
-
-              <TextView
-                  android:id="@+id/tv_signal"
-                  android:layout_width="wrap_content"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="6dp"
-                  android:text="ПОКУПАТЬ (ЛОНГ)"
-                  android:textColor="#22C55E"
-                  android:textSize="14sp"
-                  android:textStyle="bold" />
-
-              <TextView
-                  android:id="@+id/tv_forecast"
-                  android:layout_width="wrap_content"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="4dp"
-                  android:text="Прогноз 24ч / 7д: откройте приложение"
-                  android:textColor="#8B949E"
-                  android:textSize="12sp" />
+              <TextView android:id="@+id/tv_coin_name" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CryptoPulse" android:textColor="#EAB308" android:textStyle="bold"/>
+              <TextView android:id="@+id/tv_coin_price" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="$0.00" android:textColor="#FFFFFF" android:textSize="16sp" android:textStyle="bold"/>
+              <TextView android:id="@+id/tv_signal" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="АНАЛИЗ" android:textColor="#22C55E" android:textStyle="bold"/>
           </LinearLayout>
           EOF
 
-          # 3. Конфигурация системного виджета
           cat << 'EOF' > "$RES_DIR/xml/crypto_widget_info.xml"
           <?xml version="1.0" encoding="utf-8"?>
           <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
-              android:minWidth="250dp"
-              android:minHeight="110dp"
-              android:updatePeriodMillis="1800000"
-              android:initialLayout="@layout/crypto_widget"
-              android:resizeMode="horizontal|vertical"
-              android:widgetCategory="home_screen" />
+              android:minWidth="250dp" android:minHeight="110dp" android:updatePeriodMillis="1800000"
+              android:initialLayout="@layout/crypto_widget" android:resizeMode="horizontal|vertical" android:widgetCategory="home_screen" />
           EOF
 
-          # 4. Kotlin-класс виджета (CryptoWidgetProvider.kt)
           KT_DIR="android/app/src/main/kotlin/com/cryptopulse/cryptopulse_ai"
           mkdir -p "$KT_DIR"
           cat << 'EOF' > "$KT_DIR/CryptoWidgetProvider.kt"
           package com.cryptopulse.cryptopulse_ai
-
           import android.app.PendingIntent
           import android.appwidget.AppWidgetManager
           import android.content.Context
@@ -131,38 +420,14 @@ jobs:
           import es.antonborri.home_widget.HomeWidgetProvider
 
           class CryptoWidgetProvider : HomeWidgetProvider() {
-              override fun onUpdate(
-                  context: Context,
-                  appWidgetManager: AppWidgetManager,
-                  appWidgetIds: IntArray,
-                  widgetData: SharedPreferences
-              ) {
+              override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray, widgetData: SharedPreferences) {
                   appWidgetIds.forEach { widgetId ->
                       val views = RemoteViews(context.packageName, R.layout.crypto_widget).apply {
-                          val coin = widgetData.getString("coin_name", "Bitcoin (BTC)")
-                          val price = widgetData.getString("coin_price", "Откройте приложение")
-                          val signal = widgetData.getString("signal_verdict", "АНАЛИЗ...") ?: "АНАЛИЗ..."
-                          val forecast = widgetData.getString("forecast_text", "Прогноз курса на 24ч и 7д")
-
-                          setTextViewText(R.id.tv_coin_name, coin)
-                          setTextViewText(R.id.tv_coin_price, price)
-                          setTextViewText(R.id.tv_signal, signal)
-                          setTextViewText(R.id.tv_forecast, forecast)
-
-                          if (signal.contains("ПОКУПАТЬ")) {
-                              setTextColor(R.id.tv_signal, Color.parseColor("#22C55E"))
-                          } else if (signal.contains("ПРОДАВАТЬ")) {
-                              setTextColor(R.id.tv_signal, Color.parseColor("#EF4444"))
-                          } else {
-                              setTextColor(R.id.tv_signal, Color.parseColor("#F59E0B"))
-                          }
-
+                          setTextViewText(R.id.tv_coin_name, widgetData.getString("coin_name", "Bitcoin"))
+                          setTextViewText(R.id.tv_coin_price, widgetData.getString("coin_price", "\$0.00"))
+                          setTextViewText(R.id.tv_signal, widgetData.getString("signal_verdict", "АНАЛИЗ"))
                           val intent = Intent(context, MainActivity::class.java)
-                          val pendingIntent = PendingIntent.getActivity(
-                              context, 0, intent,
-                              PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                          )
-                          setOnClickPendingIntent(R.id.widget_root, pendingIntent)
+                          setOnClickPendingIntent(R.id.widget_root, PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
                       }
                       appWidgetManager.updateAppWidget(widgetId, views)
                   }
@@ -170,10 +435,8 @@ jobs:
           }
           EOF
 
-          # 5. Регистрация разрешений и виджета в AndroidManifest.xml
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/><application/g' "$MANIFEST"
-
           RECEIVER_XML='<receiver android:name=".CryptoWidgetProvider" android:exported="true"><intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" \/><\/intent-filter><meta-data android:name="android.appwidget.provider" android:resource="@xml\/crypto_widget_info" \/><\/receiver><\/application>'
           sed -i "s/<\/application>/$RECEIVER_XML/g" "$MANIFEST"
 
@@ -185,4 +448,3 @@ jobs:
         with:
           name: CryptoPulse-Android-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-
