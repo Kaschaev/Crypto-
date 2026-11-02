@@ -30,12 +30,88 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Install Dependencies & Build APK
+      - name: Create Project & Build APK
         run: |
-          # Устанавливаем плагины для уже готового проекта из репозитория
+          # Создаем чистый проект во временной директории
+          flutter create --org com.cryptopulse --project-name cryptopulse_ai /tmp/app_project
+          cd /tmp/app_project
+
+          # Копируем ваш актуальный main.dart из репозитория
+          mkdir -p lib
+          cp $GITHUB_WORKSPACE/lib/main.dart lib/main.dart
+
+          # Устанавливаем все нужные плагины
           flutter pub add http shared_preferences url_launcher home_widget
-          
-          # Сборка APK из вашего lib/main.dart
+
+          # Внедряем файлы нативного виджета Android
+          RES_DIR="android/app/src/main/res"
+          mkdir -p "$RES_DIR/layout" "$RES_DIR/xml" "$RES_DIR/drawable"
+
+          cat << 'EOF' > "$RES_DIR/drawable/widget_bg.xml"
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android">
+              <solid android:color="#161B22"/>
+              <corners android:radius="16dp"/>
+              <stroke android:width="1dp" android:color="#EAB308"/>
+          </shape>
+          EOF
+
+          cat << 'EOF' > "$RES_DIR/layout/crypto_widget.xml"
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/widget_root"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="14dp"
+              android:background="@drawable/widget_bg">
+              <TextView android:id="@+id/tv_coin_name" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CryptoPulse" android:textColor="#EAB308" android:textStyle="bold"/>
+              <TextView android:id="@+id/tv_coin_price" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="$0.00" android:textColor="#FFFFFF" android:textSize="16sp" android:textStyle="bold"/>
+              <TextView android:id="@+id/tv_signal" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="АНАЛИЗ" android:textColor="#22C55E" android:textStyle="bold"/>
+          </LinearLayout>
+          EOF
+
+          cat << 'EOF' > "$RES_DIR/xml/crypto_widget_info.xml"
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="250dp" android:minHeight="110dp" android:updatePeriodMillis="1800000"
+              android:initialLayout="@layout/crypto_widget" android:resizeMode="horizontal|vertical" android:widgetCategory="home_screen" />
+          EOF
+
+          KT_DIR="android/app/src/main/kotlin/com/cryptopulse/cryptopulse_ai"
+          mkdir -p "$KT_DIR"
+          cat << 'EOF' > "$KT_DIR/CryptoWidgetProvider.kt"
+          package com.cryptopulse.cryptopulse_ai
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.widget.RemoteViews
+          import es.antonborri.home_widget.HomeWidgetProvider
+
+          class CryptoWidgetProvider : HomeWidgetProvider() {
+              override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray, widgetData: SharedPreferences) {
+                  appWidgetIds.forEach { widgetId ->
+                      val views = RemoteViews(context.packageName, R.layout.crypto_widget).apply {
+                          setTextViewText(R.id.tv_coin_name, widgetData.getString("coin_name", "Bitcoin"))
+                          setTextViewText(R.id.tv_coin_price, widgetData.getString("coin_price", "\$0.00"))
+                          setTextViewText(R.id.tv_signal, widgetData.getString("signal_verdict", "АНАЛИЗ"))
+                          val intent = Intent(context, MainActivity::class.java)
+                          setOnClickPendingIntent(R.id.widget_root, PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+                      }
+                      appWidgetManager.updateAppWidget(widgetId, views)
+                  }
+              }
+          }
+          EOF
+
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/><application/g' "$MANIFEST"
+          RECEIVER_XML='<receiver android:name=".CryptoWidgetProvider" android:exported="true"><intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" \/><\/intent-filter><meta-data android:name="android.appwidget.provider" android:resource="@xml\/crypto_widget_info" \/><\/receiver><\/application>'
+          sed -i "s/<\/application>/$RECEIVER_XML/g" "$MANIFEST"
+
+          # Собираем APK
           flutter build apk --release
           mkdir -p /home/runner/artifact_out
           cp build/app/outputs/flutter-apk/app-release.apk /home/runner/artifact_out/app-release.apk
