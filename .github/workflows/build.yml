@@ -1,1 +1,188 @@
+name: Build Android APK & Web
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build_android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Initialize Flutter Project & Dependencies
+        run: |
+          cp lib/main.dart /tmp/main_backup.dart
+          flutter create --org com.cryptopulse --project-name cryptopulse_ai .
+          cp /tmp/main_backup.dart lib/main.dart
+          flutter pub add http shared_preferences url_launcher home_widget
+
+      - name: Inject Native Android Home Screen Widget (Kotlin + XML)
+        run: |
+          RES_DIR="android/app/src/main/res"
+          mkdir -p "$RES_DIR/layout" "$RES_DIR/xml" "$RES_DIR/drawable"
+
+          # 1. Фон виджета
+          cat << 'EOF' > "$RES_DIR/drawable/widget_bg.xml"
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android">
+              <solid android:color="#161B22"/>
+              <corners android:radius="16dp"/>
+              <stroke android:width="1dp" android:color="#EAB308"/>
+          </shape>
+          EOF
+
+          # 2. Разметка виджета на рабочем столе Android
+          cat << 'EOF' > "$RES_DIR/layout/crypto_widget.xml"
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/widget_root"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="14dp"
+              android:background="@drawable/widget_bg">
+
+              <TextView
+                  android:id="@+id/tv_coin_name"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Bitcoin (BTC)"
+                  android:textColor="#EAB308"
+                  android:textSize="15sp"
+                  android:textStyle="bold" />
+
+              <TextView
+                  android:id="@+id/tv_coin_price"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="2dp"
+                  android:text="$89,000 (+1.5%)"
+                  android:textColor="#FFFFFF"
+                  android:textSize="18sp"
+                  android:textStyle="bold" />
+
+              <TextView
+                  android:id="@+id/tv_signal"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="6dp"
+                  android:text="ПОКУПАТЬ (ЛОНГ)"
+                  android:textColor="#22C55E"
+                  android:textSize="14sp"
+                  android:textStyle="bold" />
+
+              <TextView
+                  android:id="@+id/tv_forecast"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="4dp"
+                  android:text="Прогноз 24ч / 7д: откройте приложение"
+                  android:textColor="#8B949E"
+                  android:textSize="12sp" />
+          </LinearLayout>
+          EOF
+
+          # 3. Конфигурация системного виджета
+          cat << 'EOF' > "$RES_DIR/xml/crypto_widget_info.xml"
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="250dp"
+              android:minHeight="110dp"
+              android:updatePeriodMillis="1800000"
+              android:initialLayout="@layout/crypto_widget"
+              android:resizeMode="horizontal|vertical"
+              android:widgetCategory="home_screen" />
+          EOF
+
+          # 4. Kotlin-класс виджета (CryptoWidgetProvider.kt)
+          KT_DIR="android/app/src/main/kotlin/com/cryptopulse/cryptopulse_ai"
+          mkdir -p "$KT_DIR"
+          cat << 'EOF' > "$KT_DIR/CryptoWidgetProvider.kt"
+          package com.cryptopulse.cryptopulse_ai
+
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.graphics.Color
+          import android.widget.RemoteViews
+          import es.antonborri.home_widget.HomeWidgetProvider
+
+          class CryptoWidgetProvider : HomeWidgetProvider() {
+              override fun onUpdate(
+                  context: Context,
+                  appWidgetManager: AppWidgetManager,
+                  appWidgetIds: IntArray,
+                  widgetData: SharedPreferences
+              ) {
+                  appWidgetIds.forEach { widgetId ->
+                      val views = RemoteViews(context.packageName, R.layout.crypto_widget).apply {
+                          val coin = widgetData.getString("coin_name", "Bitcoin (BTC)")
+                          val price = widgetData.getString("coin_price", "Откройте приложение")
+                          val signal = widgetData.getString("signal_verdict", "АНАЛИЗ...") ?: "АНАЛИЗ..."
+                          val forecast = widgetData.getString("forecast_text", "Прогноз курса на 24ч и 7д")
+
+                          setTextViewText(R.id.tv_coin_name, coin)
+                          setTextViewText(R.id.tv_coin_price, price)
+                          setTextViewText(R.id.tv_signal, signal)
+                          setTextViewText(R.id.tv_forecast, forecast)
+
+                          if (signal.contains("ПОКУПАТЬ")) {
+                              setTextColor(R.id.tv_signal, Color.parseColor("#22C55E"))
+                          } else if (signal.contains("ПРОДАВАТЬ")) {
+                              setTextColor(R.id.tv_signal, Color.parseColor("#EF4444"))
+                          } else {
+                              setTextColor(R.id.tv_signal, Color.parseColor("#F59E0B"))
+                          }
+
+                          val intent = Intent(context, MainActivity::class.java)
+                          val pendingIntent = PendingIntent.getActivity(
+                              context, 0, intent,
+                              PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                          )
+                          setOnClickPendingIntent(R.id.widget_root, pendingIntent)
+                      }
+                      appWidgetManager.updateAppWidget(widgetId, views)
+                  }
+              }
+          }
+          EOF
+
+          # 5. Регистрация разрешений и виджета в AndroidManifest.xml
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/><application/g' "$MANIFEST"
+
+          RECEIVER_XML='<receiver android:name=".CryptoWidgetProvider" android:exported="true"><intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" \/><\/intent-filter><meta-data android:name="android.appwidget.provider" android:resource="@xml\/crypto_widget_info" \/><\/receiver><\/application>'
+          sed -i "s/<\/application>/$RECEIVER_XML/g" "$MANIFEST"
+
+      - name: Build Release APK
+        run: flutter build apk --release
+
+      - name: Upload APK to Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CryptoPulse-Android-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
 
