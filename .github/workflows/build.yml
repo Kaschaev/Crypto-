@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java 17
-        uses: setup-java@v4
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -32,14 +32,14 @@ jobs:
 
       - name: Create Flutter Project & Inject Code
         run: |
-          # Создаем проект во временной директории, чтобы избежать конфликтов с .git
+          # Создаем проект во временной директории, чтобы избежать конфликтов
           flutter create --org com.cryptopulse --project-name cryptopulse_ai /tmp/app_project
           cd /tmp/app_project
 
-          # Устанавливаем зависимости
+          # Устанавливаем необходимые плагины
           flutter pub add http shared_preferences url_launcher home_widget
 
-          # Записываем код lib/main.dart
+          # Записываем код main.dart
           mkdir -p lib
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
@@ -165,7 +165,7 @@ jobs:
           }
           EOF
 
-          # Инъекция нативного виджета Android
+          # Инъекция файлов нативного виджета Android
           RES_DIR="android/app/src/main/res"
           mkdir -p "$RES_DIR/layout" "$RES_DIR/xml" "$RES_DIR/drawable"
 
@@ -233,7 +233,7 @@ jobs:
           RECEIVER_XML='<receiver android:name=".CryptoWidgetProvider" android:exported="true"><intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" \/><\/intent-filter><meta-data android:name="android.appwidget.provider" android:resource="@xml\/crypto_widget_info" \/><\/receiver><\/application>'
           sed -i "s/<\/application>/$RECEIVER_XML/g" "$MANIFEST"
 
-          # Собираем релизный APK
+          # Сборка APK
           flutter build apk --release
           cp build/app/outputs/flutter-apk/app-release.apk /home/runner/work/
 
